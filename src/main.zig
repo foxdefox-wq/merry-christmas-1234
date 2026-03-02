@@ -67,6 +67,13 @@ pub fn main() !void {
 
     const player = world.spawn();
     try world.positions.put(player, .{ .x = 0, .y = 0 });
+    const playSprite: Sprite = .{ .image = rl.loadTexture("assets/haha.png"), .destination = rl.Rectangle{
+        .x = 0,
+        .y = 0,
+        .width = 10,
+        .height = 10,
+    } };
+    try world.sprites.put(player, playSprite);
     try world.velocities.put(player, .{ .x = 0, .y = 0 });
 
     rl.initWindow(800, 600, "Christmas");
