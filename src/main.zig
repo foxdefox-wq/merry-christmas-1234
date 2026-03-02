@@ -1,87 +1,119 @@
 const std = @import("std");
 const rl = @import("raylib");
 
-var camera: rl.Camera2D = .{
-    .target = rl.Vector2{ .x = 0, .y = 0 },
-    // Offset determines where "target" sits on the screen (Center of screen)
-    .offset = rl.Vector2{ .x = 400, .y = 300 },
-    .rotation = 0,
-    .zoom = 1.0,
+const ID = u32;
+const Position = rl.Vector2;
+const Velocity = rl.Vector2;
+
+pub const Sprite = struct {
+    image: rl.Texture2D,
+    destination: rl.Rectangle,
 };
 
-var pos = rl.Vector2{ .x = 0, .y = 0 };
+pub const World = struct {
+    allocator: std.mem.Allocator,
+    next_id: ID = 0,
 
-const Keybind = struct {
-    keys: []const rl.KeyboardKey,
-    action: *const fn (rl.Vector2, f32) void,
-    dir: rl.Vector2,
+    players: std.AutoArrayHashMap(ID, ID),
+    positions: std.AutoHashMap(ID, Position),
+    velocities: std.AutoHashMap(ID, Velocity),
+    sprites: std.AutoArrayHashMap(ID, Sprite),
+
+    pub fn init(allocator: std.mem.Allocator) World {
+        var self: World = undefined;
+        self.allocator = allocator;
+        self.next_id = 0;
+
+        inline for (std.meta.fields(World)) |field| {
+            if (comptime (std.mem.eql(u8, field.name, "next_id") or
+                std.mem.eql(u8, field.name, "allocator"))) continue;
+
+            @field(self, field.name) = field.type.init(allocator);
+        }
+        return self;
+    }
+
+    pub fn deinit(self: *World) void {
+        inline for (std.meta.fields(World)) |field| {
+            const T = field.type;
+            switch (@typeInfo(T)) {
+                .@"struct", .@"union", .@"enum" => {
+                    if (comptime @hasDecl(T, "deinit")) {
+                        @field(self, field.name).deinit();
+                    }
+                },
+                else => {},
+            }
+        }
+    }
+
+    pub fn spawn(self: *World) ID {
+        const id = self.next_id;
+        self.next_id += 1;
+        return id;
+    }
 };
 
-// Generic move function
-pub fn move(dir: rl.Vector2, dt: f32) void {
-    const speed = 300.0;
-    pos.x += dir.x * speed * dt;
-    pos.y += dir.y * speed * dt;
-}
-
-const movement_binds = [_]Keybind{
-    .{ .keys = &.{ .w, .up }, .action = move, .dir = .{ .x = 0, .y = -1 } },
-    .{ .keys = &.{ .s, .down }, .action = move, .dir = .{ .x = 0, .y = 1 } },
-    .{ .keys = &.{ .a, .left }, .action = move, .dir = .{ .x = -1, .y = 0 } },
-    .{ .keys = &.{ .d, .right }, .action = move, .dir = .{ .x = 1, .y = 0 } },
-};
-
-const allKeybinds = movement_binds;
+var gpa_state = std.heap.GeneralPurposeAllocator(.{}){};
+var world: World = undefined;
+var camera: rl.Camera2D = undefined;
 
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
+    const allocator = gpa_state.allocator();
+    defer _ = gpa_state.deinit();
 
-    rl.initWindow(800, 600, "Camera Follow");
+    world = World.init(allocator);
+    defer world.deinit();
+
+    const player = world.spawn();
+    try world.positions.put(player, .{ .x = 0, .y = 0 });
+    try world.velocities.put(player, .{ .x = 0, .y = 0 });
+
+    rl.initWindow(800, 600, "Christmas");
     defer rl.closeWindow();
-    rl.setTargetFPS(60);
+    rl.setTargetFPS(144);
+
+    camera = rl.Camera2D{
+        .offset = .{ .x = 400, .y = 300 },
+        .target = .{ .x = 0, .y = 0 },
+        .rotation = 0,
+        .zoom = 1.0,
+    };
 
     while (!rl.windowShouldClose()) {
         const dt = rl.getFrameTime();
-
-        // 1. Update Physics
         update(dt);
 
-        // 2. Update Camera (Smooth Follow)
-        // We move the camera target 10% of the way to the player position every frame
-        const smooth_speed = 4.0 * dt;
-
-        // Use std.math.lerp for smoothing
-        camera.target.x = std.math.lerp(camera.target.x, pos.x, smooth_speed);
-        camera.target.y = std.math.lerp(camera.target.y, pos.y, smooth_speed);
-
-        // 3. Draw
         rl.beginDrawing();
-        defer rl.endDrawing();
+        rl.clearBackground(.white);
 
-        rl.clearBackground(rl.Color.white);
-
-        camera.begin();
-        defer camera.end();
-
+        rl.beginMode2D(camera);
         render();
+        rl.endMode2D();
+        rl.endDrawing();
     }
 }
 
 pub fn update(dt: f32) void {
-    for (allKeybinds) |bind| {
-        for (bind.keys) |k| {
-            if (rl.isKeyDown(k)) {
-                bind.action(bind.dir, dt);
-                break; // Don't apply same bind twice (e.g. W and Up pressed)
-            }
+    var posIter = world.positions.iterator();
+    for (posIter.next(), 0..) |entry, index| {
+        const pos = entry.value_ptr;
+        if (index == 0) {
+            const t = 5.0 * dt;
+            camera.target.x = std.math.lerp(camera.target.x, pos.x, t);
+            camera.target.y = std.math.lerp(camera.target.y, pos.y, t);
         }
     }
 }
 
 pub fn render() void {
-    // Draw grid to visualize movement
-    rl.drawGrid(100, 50.0);
-    // Draw the ball
-    rl.drawCircleV(pos, 20, rl.Color.red);
+    var iter = world.sprites.iterator();
+    while (iter.next()) |entry| {
+        const sprite = entry.value_ptr;
+        const destination = sprite.destination;
+        const image = sprite.image;
+        const source = rl.Rectangle{ .x = 0, .y = 0, .width = @floatFromInt(image.width), .height = @floatFromInt(image.height) };
+        const origin = rl.Vector2{ .x = 0, .y = 0 };
+        rl.drawTexturePro(image, source, destination, origin, 0.0, rl.Color.white);
+    }
 }
