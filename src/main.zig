@@ -3,21 +3,30 @@ const ecs = @import("ecs.zig");
 const rl = @import("raylib");
 
 const Position = rl.Vector2;
+const Hitbox = rl.Rectangle;
+const Image = rl.Texture2D;
+const Vector = rl.Vector2;
 const MyComponents = struct {
-    pos: Position,
+    Velocity: Vector,
+    Body: Hitbox,
+    Sprite: Image,
 };
 
 const game = ecs.Gen(MyComponents);
-var camera: rl.Camera2D = undefined;
+const world = undefined;
 
 pub fn main() !void {
     const gpa = std.heap.GeneralPurposeAllocator();
-    _ = gpa.allocator();
     defer _ = gpa.deinit();
+
+    world = game.World.init(gpa);
+    defer world.deinit();
+
     rl.initWindow(800, 600, "Christmas");
     defer rl.closeWindow();
     rl.setTargetFPS(60);
-    camera = rl.Camera2D{
+
+    const camera = rl.Camera2D{
         .offset = .{ .x = 400, .y = 300 },
         .target = .{ .x = 400, .y = 300 },
         .rotation = 0,
@@ -33,13 +42,12 @@ pub fn main() !void {
         rl.beginMode2D(camera);
         render();
         rl.endMode2D();
-        rl.drawFPS(10, 10);
         rl.endDrawing();
     }
 }
 
 pub fn update(dt: f32) void {
-    _ = dt;
+    game.World.addComp(self: *World, id: u32, comptime name: []const u8, val: anytype)
 }
 
 pub fn render() void {}
