@@ -1,6 +1,5 @@
 const std = @import("std");
 const rl = @import("raylib");
-
 const ecs = @import("ecs.zig");
 
 const MyComponents = struct {
