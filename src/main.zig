@@ -21,29 +21,52 @@ pub fn main() !void {
         draw: ?*const fn (*anyopaque) void = null,
     };
 
-    const Entity = struct {
+    const EntityPrototype = struct {
         id: u32,
         self: *anyopaque,
         vtable: VTable,
     };
 
     const World = struct {
-        allocator: std.mem.Allocator,
-        next_id: u32 = 1,
+        entities: std.AutoArrayHashMap(u32, *anyopaque),
+        alloc: std.mem.Allocator,
+        var next_id: u32 = 1;
+        var Self = @This();
 
-        var entities = std.AutoArrayHashMap(u32, *anyopaque);
+        fn getID() u32 {
+            const id = next_id;
+            next_id += 1;
+            return id;
+        }
 
-        pub fn init(alloc: std.mem.Allocator) World {
+        pub fn spawnEntity(ptr: *anyopaque) u32 {
+            const entity: *EntityPrototype = @ptrCast(@alignCast(ptr));
+            entity.id = getID();
+            entity.self = entity;
+        }
+
+        pub fn deleteEntity(id: u32) !void {
+            Self.
+        }
+
+        pub fn update() void {
+            std.log.debug("Updating", .{});
+        }
+
+        pub fn init(alloc: std.mem.Allocator) @This() {
+            entities.init(alloc);
             return .{
                 .allocator = alloc,
             };
         }
     };
 
+    const world = World.init(gpa);
     while (!rl.windowShouldClose()) {
         rl.beginDrawing();
         rl.clearBackground(rl.Color.ray_white);
         rl.beginMode2D(camera);
+        world.update();
 
         rl.endMode2D();
         rl.endDrawing();
