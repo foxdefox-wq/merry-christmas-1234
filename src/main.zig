@@ -7,6 +7,7 @@ pub fn main() !void {
     const world = b2.b2CreateWorld(&world_def);
     defer b2.b2DestroyWorld(world);
 
+    //ee
     // Ground
     var ground_def = b2.b2DefaultBodyDef();
     ground_def.position = .{ .x = 0.0, .y = 8.0 };
