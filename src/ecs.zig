@@ -47,11 +47,5 @@ pub fn createWorldStruct(comptime ComponentHolder: type) type {
 }
 
 test "Test Components" {
-    const Components = struct {
-        Position : @Vector(3, f32)
-    };
-    fn DeInit(component_field : *anyopaque) void {
-      switch (component_field) {}
-    };
-    const DeInitFunc =
+    const Components = struct { Position: @Vector(3, f32) };
 }
