@@ -4,7 +4,19 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    // 1. Define the executable
+    // --- raylib ---
+    const raylib_dep = b.dependency("raylib_zig", .{
+        .target = target,
+        .optimize = optimize,
+    });
+
+    // --- box2d ---
+    const box2d_dep = b.dependency("box2d", .{
+        .target = target,
+        .optimize = optimize,
+    });
+
+    // --- executable ---
     const exe = b.addExecutable(.{
         .name = "zigtest",
         .root_module = b.createModule(.{
@@ -14,40 +26,19 @@ pub fn build(b: *std.Build) void {
         }),
     });
 
-    // 2. Add Raylib Dependencies
-    const raylib_dep = b.dependency("raylib_zig", .{
-        .target = target,
-        .optimize = optimize,
-    });
+    exe.root_module.linkLibrary(raylib_dep.artifact("raylib"));
+    exe.root_module.addImport("raylib", raylib_dep.module("raylib"));
+    exe.root_module.addImport("raygui", raylib_dep.module("raygui"));
 
-    const raylib = raylib_dep.module("raylib");
-    const raygui = raylib_dep.module("raygui");
-    const raylib_artifact = raylib_dep.artifact("raylib");
+    exe.root_module.linkLibrary(box2d_dep.artifact("box2d"));
+    exe.addIncludePath(box2d_dep.path("."));
+    exe.linkLibC();
 
-    exe.root_module.linkLibrary(raylib_artifact);
-    exe.root_module.addImport("raylib", raylib);
-    exe.root_module.addImport("raygui", raygui);
-
-    // 3. Install the executable
     b.installArtifact(exe);
 
-    // 4. Set up the 'run' step
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        run_cmd.addArgs(args);
-    }
-    const run_step = b.step("run", "Run the app");
-    run_step.dependOn(&run_cmd.step);
+    if (b.args) |args| run_cmd.addArgs(args);
 
-    // 5. Set up the 'test' step
-    // Since we removed root.zig, we only create a test runner for main.zig
-    const exe_unit_tests = b.addTest(.{
-        .root_module = exe.root_module,
-    });
-
-    const run_exe_unit_tests = b.addRunArtifact(exe_unit_tests);
-
-    const test_step = b.step("test", "Run unit tests");
-    test_step.dependOn(&run_exe_unit_tests.step);
+    b.step("run", "Run the app").dependOn(&run_cmd.step);
 }

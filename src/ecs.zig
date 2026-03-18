@@ -1,99 +1,129 @@
 const std = @import("std");
-const rl = @import("raylib-zig");
 
-fn cleanupFn(comptime T: type) ?*const fn (T) void {
-    return if (T == rl.Texture2D)
-        &rl.unloadTexture
-    else if (T == rl.RenderTexture2D)
-        &rl.unloadRenderTexture
-    else if (T == rl.Image)
-        &rl.unloadImage
-    else if (T == rl.Mesh)
-        &rl.unloadMesh
-    else
-        null;
-}
-
-const EntityData = struct {
-    Position: ?rl.Vector3 = null,
-    Velocity: ?rl.Vector3 = null,
-    Texture: ?rl.Texture2D = null,
-
-    pub fn makeEntity(data: anytype) EntityData {
-        var entity = EntityData{};
-        inline for (std.meta.fields(@TypeOf(data))) |field| {
-            if (!@hasField(EntityData, field.name)) {
-                @compileError("Unknown field: " ++ field.name);
-            }
-            @field(entity, field.name) = @field(data, field.name);
-        }
-        return entity;
-    }
+pub const EntityId = struct {
+    index: u32,
+    generation: u32,
 };
 
-pub const World = struct {
-    const Self = @This();
-    var next_id: u32 = 0;
+pub fn ECS(comptime EntityData: type, comptime Cleanup: type) type {
+    return struct {
+        const Self = @This();
 
-    allocator: std.mem.Allocator,
-    entities: std.MultiArrayList(EntityData),
+        allocator: std.mem.Allocator,
+        entities: std.ArrayListUnmanaged(EntityData),
+        generations: std.ArrayListUnmanaged(u32),
+        alive: std.ArrayListUnmanaged(bool),
+        free_list: std.ArrayListUnmanaged(u32),
 
-    pub fn init(allocator: std.mem.Allocator) Self {
-        return Self{
-            .allocator = allocator,
-            .entities = .{},
-        };
-    }
-
-    fn getNextID() u32 {
-        const id = next_id;
-        next_id += 1;
-        return id;
-    }
-
-    pub fn spawn(self: *Self, entity: EntityData) !u32 {
-        const id = getNextID();
-        try self.entities.append(self.allocator, entity);
-        return id;
-    }
-
-    pub fn kill(self: *Self, id: u32) void {
-        if (id >= self.entities.len) return;
-        cleanupEntity(&self.entities, id);
-        self.entities.set(id, .{});
-    }
-
-    pub fn deinit(self: *Self) void {
-        var i: usize = 0;
-        while (i < self.entities.len) : (i += 1) {
-            cleanupEntity(&self.entities, i);
+        /// Creates an empty world.
+        pub fn init(allocator: std.mem.Allocator) Self {
+            return .{
+                .allocator = allocator,
+                .entities = .{},
+                .generations = .{},
+                .alive = .{},
+                .free_list = .{},
+            };
         }
-        self.entities.deinit(self.allocator);
-    }
 
-    fn cleanupEntity(entities: *std.MultiArrayList(EntityData), idx: usize) void {
-        inline for (std.meta.fields(EntityData)) |field| {
-            const info = @typeInfo(field.type);
-            if (info != .Optional) continue;
+        /// Spawns an entity. Reuses dead slots when available.
+        pub fn spawn(self: *Self, entity: EntityData) !EntityId {
+            if (self.free_list.items.len > 0) {
+                const index = self.free_list.items[self.free_list.items.len - 1];
+                self.free_list.items.len -= 1;
+                self.entities.items[index] = entity;
+                self.alive.items[index] = true;
+                return .{ .index = index, .generation = self.generations.items[index] };
+            }
 
-            const Inner = info.Optional.child;
-            if (comptime cleanupFn(Inner)) |deinit_fn| {
-                const slice = entities.items(@enumFromInt(field.index));
-                if (slice[idx]) |val| {
-                    deinit_fn(val);
-                    slice[idx] = null;
+            const index: u32 = @intCast(self.entities.items.len);
+            try self.entities.append(self.allocator, entity);
+            try self.generations.append(self.allocator, 0);
+            try self.alive.append(self.allocator, true);
+            return .{ .index = index, .generation = 0 };
+        }
+
+        /// Returns true if this ID refers to a living entity.
+        pub fn isAlive(self: *Self, id: EntityId) bool {
+            if (id.index >= self.entities.items.len) return false;
+            return self.alive.items[id.index] and
+                self.generations.items[id.index] == id.generation;
+        }
+
+        /// Returns a copy of the entity data.
+        pub fn get(self: *Self, id: EntityId) ?EntityData {
+            if (!self.isAlive(id)) return null;
+            return self.entities.items[id.index];
+        }
+
+        /// Returns a pointer for in-place mutation.
+        pub fn getPtr(self: *Self, id: EntityId) ?*EntityData {
+            if (!self.isAlive(id)) return null;
+            return &self.entities.items[id.index];
+        }
+
+        /// Replaces the entity data.
+        pub fn set(self: *Self, id: EntityId, data: EntityData) void {
+            if (!self.isAlive(id)) return;
+            self.entities.items[id.index] = data;
+        }
+
+        /// Kills the entity. Bumps generation so old IDs become invalid.
+        pub fn kill(self: *Self, id: EntityId) !void {
+            if (!self.isAlive(id)) return;
+            cleanupEntity(&self.entities.items[id.index]);
+            self.entities.items[id.index] = .{};
+            self.alive.items[id.index] = false;
+            self.generations.items[id.index] += 1;
+            try self.free_list.append(self.allocator, id.index);
+        }
+
+        /// Number of living entities.
+        pub fn count(self: *Self) u32 {
+            var n: u32 = 0;
+            for (self.alive.items) |a| {
+                if (a) n += 1;
+            }
+            return n;
+        }
+
+        /// Total slots (alive + dead). Use for iteration.
+        pub fn capacity(self: *Self) u32 {
+            return @intCast(self.entities.items.len);
+        }
+
+        /// Get an EntityId for a raw index, if alive.
+        /// Useful for iteration.
+        pub fn entityAt(self: *Self, index: u32) ?EntityId {
+            if (index >= self.entities.items.len) return null;
+            if (!self.alive.items[index]) return null;
+            return .{ .index = index, .generation = self.generations.items[index] };
+        }
+
+        /// Cleans up everything.
+        pub fn deinit(self: *Self) void {
+            for (self.entities.items, self.alive.items) |*entity, is_alive| {
+                if (is_alive) cleanupEntity(entity);
+            }
+            self.entities.deinit(self.allocator);
+            self.generations.deinit(self.allocator);
+            self.alive.deinit(self.allocator);
+            self.free_list.deinit(self.allocator);
+        }
+
+        fn cleanupEntity(entity: *EntityData) void {
+            inline for (std.meta.fields(EntityData)) |field| {
+                const info = @typeInfo(field.type);
+                if (info != .optional) continue;
+
+                const Inner = info.optional.child;
+                const slot = &@field(entity, field.name);
+
+                if (slot.*) |value| {
+                    Cleanup.cleanup(Inner, value);
+                    slot.* = null;
                 }
             }
         }
-    }
-
-    pub fn getComponents(self: *Self, id: u32) ?EntityData {
-        if (id >= self.entities.len) return null;
-        return self.entities.get(id);
-    }
-
-    pub fn setComponents(self: *Self, id: u32, data: EntityData) void {
-        if (id >= self.entities.len) return;
-        self.entities.set(id, data);
-    }
-};
+    };
+}
