@@ -2,6 +2,7 @@ const std = @import("std");
 const b2 = @import("box2d.zig").c;
 const rl = @import("raylib");
 const ecs = @import("ecs.zig");
+const kb = @import("keybind.zig");
 
 const SCREEN_WIDTH = 800;
 const SCREEN_HEIGHT = 800;
@@ -18,7 +19,14 @@ const AnimatedTexture = struct {
     next: rl.Texture2D,
 };
 
-const PlayerController = struct {};
+const PlayerController = struct {
+    speed: f32,
+};
+
+const Bullet = struct {
+    lifetime: f32,
+    speed: f32,
+};
 
 const Animator = union(enum) {
     static: rl.Texture2D,
@@ -33,7 +41,6 @@ const PhysicsBody = struct {
     body_id: b2.b2BodyId,
     shape_id: b2.b2ShapeId,
     render_type: RenderType,
-    PlayerController: ?PlayerController,
 };
 
 const Physics = union(enum) {
@@ -47,6 +54,7 @@ const Components = struct {
     physics: ?Physics = null,
     velocity: ?Velocity = null,
     player_controller: ?PlayerController = null,
+    bullet: ?Bullet = null,
 };
 
 fn deinitFn(ptr: *anyopaque, field: std.builtin.Type.StructField) void {
@@ -57,8 +65,8 @@ fn deinitFn(ptr: *anyopaque, field: std.builtin.Type.StructField) void {
 const WorldType = ecs.World(Components, deinitFn);
 
 // Spawn helpers
-fn spawnCamera(world: *WorldType) !*?rl.Camera2D {
-    const id = try world.spawn(.{
+fn spawnCamera(world: *WorldType) !u32 {
+    return try world.spawn(.{
         .camera = rl.Camera2D{
             .offset = .{
                 .x = @as(f32, SCREEN_WIDTH) / 2.0,
@@ -69,34 +77,25 @@ fn spawnCamera(world: *WorldType) !*?rl.Camera2D {
             .zoom = 1,
         },
     });
-    return world.getComponent(id, .camera);
 }
 
-fn spawnBox(
-    world: *WorldType,
-    phys_world: b2.b2WorldId,
-    body_type: c_uint,
-    x: f32,
-    y: f32,
-    half_w: f32,
-    half_h: f32,
-    density: f32,
-    texture: rl.Texture2D,
-) !void {
+fn spawnPlayer(world: *WorldType, phys_world: b2.b2WorldId, pos: rl.Vector2) !u32 {
+    const texture = try rl.loadTexture("assets/haha.png");
+
+    const half_w: f32 = 30.0 / PIXELS_PER_METER;
+    const half_h: f32 = 30.0 / PIXELS_PER_METER;
+
     var body_def = b2.b2DefaultBodyDef();
-    body_def.type = body_type;
-    body_def.position = .{ .x = x, .y = y };
+    body_def.type = b2.b2_dynamicBody;
+    body_def.position = .{ .x = pos.x, .y = pos.y };
 
     const body_id = b2.b2CreateBody(phys_world, &body_def);
 
     var box = b2.b2MakeBox(half_w, half_h);
-
     var shape_def = b2.b2DefaultShapeDef();
-    shape_def.density = density;
-
     const shape_id = b2.b2CreatePolygonShape(body_id, &shape_def, &box);
 
-    _ = try world.spawn(.{
+    return try world.spawn(.{
         .physics = .{
             .body = .{
                 .body_id = body_id,
@@ -105,6 +104,50 @@ fn spawnBox(
             },
         },
         .animator = .{ .static = texture },
+        .player_controller = .{ .speed = 100.0 },
+    });
+}
+
+fn spawnBullet(
+    world: *WorldType,
+    phys_world: b2.b2WorldId,
+    bullet_texture: rl.Texture2D,
+    pos: b2.b2Vec2,
+    dir: b2.b2Vec2,
+) !u32 {
+    const half_w: f32 = 10.0 / PIXELS_PER_METER;
+    const half_h: f32 = 10.0 / PIXELS_PER_METER;
+
+    var body_def = b2.b2DefaultBodyDef();
+    body_def.type = b2.b2_dynamicBody;
+    body_def.position = pos;
+    body_def.isBullet = true;
+
+    const body_id = b2.b2CreateBody(phys_world, &body_def);
+
+    var box = b2.b2MakeBox(half_w, half_h);
+    var shape_def = b2.b2DefaultShapeDef();
+    const shape_id = b2.b2CreatePolygonShape(body_id, &shape_def, &box);
+
+    const bullet_speed: f32 = 15.0;
+    b2.b2Body_SetLinearVelocity(body_id, .{
+        .x = dir.x * bullet_speed,
+        .y = dir.y * bullet_speed,
+    });
+
+    return try world.spawn(.{
+        .physics = .{
+            .body = .{
+                .body_id = body_id,
+                .shape_id = shape_id,
+                .render_type = .rectangle,
+            },
+        },
+        .animator = .{ .static = bullet_texture },
+        .bullet = .{
+            .lifetime = 30.0,
+            .speed = bullet_speed,
+        },
     });
 }
 
@@ -112,6 +155,10 @@ fn spawnBox(
 pub fn main() !void {
     rl.initWindow(SCREEN_WIDTH, SCREEN_HEIGHT, "Test");
     defer rl.closeWindow();
+
+    rl.initAudioDevice();
+    defer rl.closeAudioDevice();
+
     rl.setTargetFPS(60);
 
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -120,42 +167,95 @@ pub fn main() !void {
     var world = WorldType.init(gpa.allocator());
     defer world.deinit();
 
+    const ball_sound = try rl.loadSound("assets/ball.wav");
+    defer rl.unloadSound(ball_sound);
+
+    const bullet_texture = try rl.loadTexture("assets/360.png");
+    defer rl.unloadTexture(bullet_texture);
+
     // Physics world
-    const phys_world = try b2.b2DefaultWorldDef();
+    var world_def = b2.b2DefaultWorldDef();
+    world_def.gravity = b2.b2Vec2{ .x = 0, .y = 0 };
+    const phys_world = b2.b2CreateWorld(&world_def);
     defer b2.b2DestroyWorld(phys_world);
 
-    // Spawn camera
-    const camera_id = try world.spawn(.{
-        .camera = rl.Camera2D{
-            .offset = .{
-                .x = @as(f32, SCREEN_WIDTH) / 2.0,
-                .y = @as(f32, SCREEN_HEIGHT) / 2.0,
-            },
-            .rotation = 0,
-            .target = .{ .x = 0, .y = 0 },
-            .zoom = 1,
-        },
+    _ = try world.spawn(.{
+        .physics = .{ .world = phys_world },
     });
 
-    // Game loop
+    const camera_id = try spawnCamera(&world);
+    _ = try spawnPlayer(&world, phys_world, .{ .x = 0, .y = 0 });
+
     while (!rl.windowShouldClose()) {
-        // Pointer changes every game loop
-        const camera_ptr = world.getComponent(camera_id, .camera);
-        update(rl.getFrameTime(), &world, camera_ptr);
+        update(rl.getFrameTime(), &world, camera_id, ball_sound, bullet_texture);
     }
 }
 
+fn updateCamera(world: *WorldType, cam: *rl.Camera2D) void {
+    const player_pos: b2.b2Vec2 = blk: {
+        const players = world.components.items(.player_controller);
+        const bodies = world.components.items(.physics);
+
+        for (players, bodies) |maybe_player, maybe_body| {
+            if (maybe_player == null or maybe_body == null) continue;
+
+            const phys = maybe_body.?;
+            switch (phys) {
+                .body => |body| break :blk b2.b2Body_GetPosition(body.body_id),
+                .world => continue,
+            }
+        }
+
+        break :blk .{ .x = 0, .y = 0 };
+    };
+
+    const target_x = player_pos.x * PIXELS_PER_METER;
+    const target_y = player_pos.y * PIXELS_PER_METER;
+
+    const lerp_factor: f32 = 0.3;
+
+    cam.target = rl.Vector2{
+        .x = std.math.lerp(cam.target.x, target_x, lerp_factor),
+        .y = std.math.lerp(cam.target.y, target_y, lerp_factor),
+    };
+}
+
 // Update loop
-fn update(delta: f32, world: *WorldType, camera_ptr: *?rl.Camera2D) void {
+fn update(
+    delta: f32,
+    world: *WorldType,
+    camera_id: u32,
+    ball_sound: rl.Sound,
+    bullet_texture: rl.Texture2D,
+) void {
     processAnimators(world);
+
+    const phys_world = findPhysicsWorld(world) orelse return;
+
+    // Get camera pointer for player aiming before possible spawn
+    {
+        const camera_ptr = world.getComponent(camera_id, .camera);
+        const cam: *rl.Camera2D = &camera_ptr.*.?;
+        movePlayer(world, cam, phys_world, ball_sound, bullet_texture) catch {};
+    }
+
     stepPhysics(world, delta);
+    updateBullets(world, delta);
+
+    // Reacquire camera pointer after any world.spawn/world mutation
+    const camera_ptr = world.getComponent(camera_id, .camera);
+    const cam: *rl.Camera2D = &camera_ptr.*.?;
+
+    updateCamera(world, cam);
 
     rl.beginDrawing();
     defer rl.endDrawing();
     rl.clearBackground(.white);
 
-    if (camera_ptr.*) |camera| {
-        rl.beginMode2D(camera);
+    if (camera_ptr.*) |*camera| {
+        rl.beginMode2D(camera.*);
+        camera.zoom += rl.getMouseWheelMove();
+        rl.drawCircle(0, 0, 5, .red);
         defer rl.endMode2D();
         drawBodies(world);
     } else {
@@ -177,7 +277,7 @@ fn findPhysicsWorld(world: *WorldType) ?b2.b2WorldId {
 }
 
 fn stepPhysics(world: *WorldType, delta: f32) void {
-    const phys_world = findPhysicsWorld(world) orelse @compileError("No physics world");
+    const phys_world = findPhysicsWorld(world) orelse return;
     b2.b2World_Step(phys_world, delta, 4);
 
     const physics_list = world.components.items(.physics);
@@ -208,6 +308,33 @@ fn applyVelocity(body_id: b2.b2BodyId, vel: Velocity) void {
                 b2.b2Body_GetRotation(body_id),
             );
         },
+    }
+}
+
+fn updateBullets(world: *WorldType, delta: f32) void {
+    const bullets = world.components.items(.bullet);
+    const physics_list = world.components.items(.physics);
+    const animator_list = world.components.items(.animator);
+
+    for (bullets, physics_list, animator_list) |*maybe_bullet, *maybe_phys, *maybe_anim| {
+        if (maybe_bullet.* == null or maybe_phys.* == null) continue;
+
+        var bullet = maybe_bullet.*.?;
+        bullet.lifetime -= delta;
+
+        if (bullet.lifetime <= 0) {
+            const phys = maybe_phys.*.?;
+            switch (phys) {
+                .body => |body| b2.b2DestroyBody(body.body_id),
+                .world => {},
+            }
+
+            maybe_bullet.* = null;
+            maybe_phys.* = null;
+            maybe_anim.* = null;
+        } else {
+            maybe_bullet.* = bullet;
+        }
     }
 }
 
@@ -284,4 +411,77 @@ fn drawRectangleBody(body: PhysicsBody, anim: Animator) void {
         angle_deg,
         .white,
     );
+}
+
+fn movePlayer(
+    world: *WorldType,
+    camera: *rl.Camera2D,
+    phys_world: b2.b2WorldId,
+    ball_sound: rl.Sound,
+    bullet_texture: rl.Texture2D,
+) !void {
+    const player_controllers = world.components.items(.player_controller);
+    const physics_list = world.components.items(.physics);
+
+    var shoot_pos: ?b2.b2Vec2 = null;
+    var shoot_dir: ?b2.b2Vec2 = null;
+
+    for (player_controllers, physics_list) |maybe_pc, maybe_phys| {
+        if (maybe_pc == null or maybe_phys == null) continue;
+
+        const pc = maybe_pc.?;
+        const phys = maybe_phys.?;
+
+        const body = switch (phys) {
+            .body => |body| body,
+            .world => continue,
+        };
+
+        const body_pos = b2.b2Body_GetPosition(body.body_id);
+        const center = b2.b2Body_GetWorldCenterOfMass(body.body_id);
+
+        const mouse_world_rl = rl.getScreenToWorld2D(rl.getMousePosition(), camera.*);
+        const mouse_x = mouse_world_rl.x / PIXELS_PER_METER;
+        const mouse_y = mouse_world_rl.y / PIXELS_PER_METER;
+
+        const dx = mouse_x - body_pos.x;
+        const dy = mouse_y - body_pos.y;
+        const angle = std.math.atan2(dy, dx);
+
+        const rot = b2.b2Rot{
+            .c = @cos(angle),
+            .s = @sin(angle),
+        };
+        b2.b2Body_SetTransform(body.body_id, body_pos, rot);
+
+        if (rl.isKeyDown(.w)) {
+            b2.b2Body_ApplyForce(body.body_id, .{ .x = 0, .y = -pc.speed }, center, true);
+        }
+        if (rl.isKeyDown(.s)) {
+            b2.b2Body_ApplyForce(body.body_id, .{ .x = 0, .y = pc.speed }, center, true);
+        }
+        if (rl.isKeyDown(.a)) {
+            b2.b2Body_ApplyForce(body.body_id, .{ .x = -pc.speed, .y = 0 }, center, true);
+        }
+        if (rl.isKeyDown(.d)) {
+            b2.b2Body_ApplyForce(body.body_id, .{ .x = pc.speed, .y = 0 }, center, true);
+        }
+
+        if (rl.isMouseButtonPressed(.left)) {
+            const len = @sqrt(dx * dx + dy * dy);
+            if (len > 0.0001) {
+                shoot_pos = body_pos;
+                shoot_dir = .{
+                    .x = dx / len,
+                    .y = dy / len,
+                };
+            }
+        }
+    }
+
+    if (shoot_pos) |pos| {
+        const dir = shoot_dir.?;
+        rl.playSound(ball_sound);
+        _ = try spawnBullet(world, phys_world, bullet_texture, pos, dir);
+    }
 }
