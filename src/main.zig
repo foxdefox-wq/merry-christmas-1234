@@ -3,86 +3,112 @@ const b2 = @import("box2d.zig").c;
 const rl = @import("raylib");
 const ecs = @import("ecs.zig");
 
-// For some reason raylibs default .zero() doesn't work so
-const ZERO = rl.Vector2{ .x = 0, .y = 0 };
+const SCREEN_WIDTH = 800;
+const SCREEN_HEIGHT = 800;
+const PIXELS_PER_METER: f32 = 32.0;
 
-// Components here
-
-// Either teleport to [Next Position] or apply velocity to the entities "Body" and consume it
+// Components
 const Velocity = union(enum) {
-    Velocity: rl.Vector3,
-    NPosition: rl.Vector3,
+    velocity: rl.Vector2,
+    teleport: rl.Vector2,
 };
 
 const AnimatedTexture = struct {
-    Texture: rl.Texture2D,
-    // [Next Texture] will be consumed and set to current texture
-    // This is just a very simple way of doing animations for now
-    // Later on we could make sprite sheets and some config settings for how to loop through or whatever
-    NTexture: rl.Texture2D,
+    current: rl.Texture2D,
+    next: rl.Texture2D,
 };
+
+const PlayerController = struct {};
 
 const Animator = union(enum) {
-    StaticTexture: rl.Texture2D,
-    AnimatedTexture: AnimatedTexture,
+    static: rl.Texture2D,
+    animated: AnimatedTexture,
 };
 
-// We'll make all the components here
-// It might get a little messy later on with a bunch of one off, "isThisorThat : bool"
-// So try to avoid that
-const Components = struct {
-    PlayerCamera: ?rl.Camera2D = null,
-    Animator: ?Animator = null,
-
-    // One thing cannot have both at once
-    // Therefore we seperate into one union
-    // What to call it?
-    Box2D_ID: Box2D_ID,
+const RenderType = enum {
+    rectangle,
 };
 
-const Body = struct {
-    // We use Box2D's getters and setters to adjust
-    // It's like a mini ecs inside our ecs
+const PhysicsBody = struct {
     body_id: b2.b2BodyId,
     shape_id: b2.b2ShapeId,
+    render_type: RenderType,
+    PlayerController: ?PlayerController,
 };
 
-const Box2D_ID = union(enum) {
-    World: b2.b2WorldId,
-    Body: Body,
+const Physics = union(enum) {
+    world: b2.b2WorldId,
+    body: PhysicsBody,
 };
 
-// Seperate from entity component system world!!!
-// Used for Box2D
-// DON'T PUT RUNTIME STUFF IN HERE OR INIT() FUNCTIONS
-// THERES PROBABLY A BETTER WAY TO DO IT
-const PhysicsWorldPrefab = Components{
-    .PhysicsWorldID = b2.b2WorldId,
+const Components = struct {
+    camera: ?rl.Camera2D = null,
+    animator: ?Animator = null,
+    physics: ?Physics = null,
+    velocity: ?Velocity = null,
+    player_controller: ?PlayerController = null,
 };
 
-// Prefabs
-const CameraPrefab = Components{
-    .PlayerCamera = rl.Camera2D{
-        .offset = ZERO,
-        .rotation = 0,
-        .target = ZERO,
-        .zoom = 1,
-    },
-};
-
-fn deinit_fn(ptr: *anyopaque, field: std.builtin.Type.StructField) void {
-    if (field.type == ?AnimatedTexture) {
-        rl.unloadTexture(ptr);
-    }
+fn deinitFn(ptr: *anyopaque, field: std.builtin.Type.StructField) void {
+    _ = ptr;
+    _ = field;
 }
 
-// For Box2D pixel per meter calculations
-const SCREEN_WIDTH = 800;
-const SCREEN_HEIGHT = 800;
-const WorldType = ecs.World(Components, deinit_fn);
-// Let it be used everywhere
-var world: WorldType = undefined;
+const WorldType = ecs.World(Components, deinitFn);
 
+// Spawn helpers
+fn spawnCamera(world: *WorldType) !*?rl.Camera2D {
+    const id = try world.spawn(.{
+        .camera = rl.Camera2D{
+            .offset = .{
+                .x = @as(f32, SCREEN_WIDTH) / 2.0,
+                .y = @as(f32, SCREEN_HEIGHT) / 2.0,
+            },
+            .rotation = 0,
+            .target = .{ .x = 0, .y = 0 },
+            .zoom = 1,
+        },
+    });
+    return world.getComponent(id, .camera);
+}
+
+fn spawnBox(
+    world: *WorldType,
+    phys_world: b2.b2WorldId,
+    body_type: c_uint,
+    x: f32,
+    y: f32,
+    half_w: f32,
+    half_h: f32,
+    density: f32,
+    texture: rl.Texture2D,
+) !void {
+    var body_def = b2.b2DefaultBodyDef();
+    body_def.type = body_type;
+    body_def.position = .{ .x = x, .y = y };
+
+    const body_id = b2.b2CreateBody(phys_world, &body_def);
+
+    var box = b2.b2MakeBox(half_w, half_h);
+
+    var shape_def = b2.b2DefaultShapeDef();
+    shape_def.density = density;
+
+    const shape_id = b2.b2CreatePolygonShape(body_id, &shape_def, &box);
+
+    _ = try world.spawn(.{
+        .physics = .{
+            .body = .{
+                .body_id = body_id,
+                .shape_id = shape_id,
+                .render_type = .rectangle,
+            },
+        },
+        .animator = .{ .static = texture },
+    });
+}
+
+// Main
 pub fn main() !void {
     rl.initWindow(SCREEN_WIDTH, SCREEN_HEIGHT, "Test");
     defer rl.closeWindow();
@@ -91,99 +117,171 @@ pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
 
-    // Creating the world, wow
-    world = WorldType.init(gpa.allocator());
+    var world = WorldType.init(gpa.allocator());
     defer world.deinit();
 
-    // No real reason for camera to be part of the ECS but it's cool right?
-    const camera_ptr: *rl.Camera = blk: {
-        const id = try world.spawn(CameraPrefab);
-        break :blk world.getComponent(id, .PlayerCamera);
-    };
+    // Physics world
+    const phys_world = try b2.b2DefaultWorldDef();
+    defer b2.b2DestroyWorld(phys_world);
 
-    const phys_world_ptr: *b2.b2WorldId = blk: {
-        const id = try world.spawn(PhysicsWorldPrefab);
-        break :blk world.getComponent(id, .PhysicsWorldID);
-    };
-    _ = phys_world_ptr;
+    // Spawn camera
+    const camera_id = try world.spawn(.{
+        .camera = rl.Camera2D{
+            .offset = .{
+                .x = @as(f32, SCREEN_WIDTH) / 2.0,
+                .y = @as(f32, SCREEN_HEIGHT) / 2.0,
+            },
+            .rotation = 0,
+            .target = .{ .x = 0, .y = 0 },
+            .zoom = 1,
+        },
+    });
 
+    // Game loop
     while (!rl.windowShouldClose()) {
-        update(rl.getFrameTime(), world, camera_ptr);
+        // Pointer changes every game loop
+        const camera_ptr = world.getComponent(camera_id, .camera);
+        update(rl.getFrameTime(), &world, camera_ptr);
     }
 }
 
-fn update(delta: f32, w: WorldType, camera_ptr: *?rl.Camera2D) void {
-    _ = delta;
+// Update loop
+fn update(delta: f32, world: *WorldType, camera_ptr: *?rl.Camera2D) void {
+    processAnimators(world);
+    stepPhysics(world, delta);
+
     rl.beginDrawing();
     defer rl.endDrawing();
     rl.clearBackground(.white);
-    draw(w);
 
     if (camera_ptr.*) |camera| {
         rl.beginMode2D(camera);
         defer rl.endMode2D();
+        drawBodies(world);
     } else {
-        @panic("Uhh, theres not a camera");
+        @panic("No camera found");
     }
 }
 
-fn draw(w: *WorldType) void {
-    const box2d_ids = w.components.items(.Box2D_ID);
-    const animators = w.components.items(.Animator);
-    const scale: f32 = 32.0;
+// Physics
+fn findPhysicsWorld(world: *WorldType) ?b2.b2WorldId {
+    for (world.components.items(.physics)) |maybe| {
+        if (maybe) |p| {
+            switch (p) {
+                .world => |wid| return wid,
+                .body => {},
+            }
+        }
+    }
+    return null;
+}
 
-    lbl: for (box2d_ids, animators) |box2d_id, animator| {
-        const bid = switch (box2d_id) {
-            .World => continue :lbl, // Skip the global world object
-            .Body => |id| id, // Unwrap and keep the actual ID
-            // .none => continue :lbl, // If you have an empty state
-            else => {
-                @compileError("Flippin forgot to add the switch statement to the drawing thingie");
-            }, // This reminds me to add it here
-        };
+fn stepPhysics(world: *WorldType, delta: f32) void {
+    const phys_world = findPhysicsWorld(world) orelse @compileError("No physics world");
+    b2.b2World_Step(phys_world, delta, 4);
 
-        const b_id = bid.body_id;
-        const texture = animator.StaticTexture;
-        const pos = b2.b2Body_GetPosition(b_id);
-        const angle = b2.b2Body_GetAngle(b_id); // In radians
-        var s_id: b2.b2ShapeId = undefined;
-        _ = b2.b2Body_GetShapes(b_id, &s_id, 1);
-        const poly = b2.b2Shape_GetPolygon(s_id);
+    const physics_list = world.components.items(.physics);
+    const velocity_list = world.components.items(.velocity);
 
-        // Box2D 'half-extents' means width is twice the vertex distance
-        const width = (poly.vertices[1].x - poly.vertices[0].x) * scale;
-        const height = (poly.vertices[2].y - poly.vertices[1].y) * scale;
+    for (physics_list, velocity_list) |maybe_phys, maybe_vel| {
+        if (maybe_phys == null or maybe_vel == null) continue;
 
-        const dest_rect = rl.Rectangle{
-            .x = pos.x * scale,
-            .y = pos.y * scale,
+        const phys = maybe_phys.?;
+        const vel = maybe_vel.?;
+
+        switch (phys) {
+            .body => |body| applyVelocity(body.body_id, vel),
+            .world => {},
+        }
+    }
+}
+
+fn applyVelocity(body_id: b2.b2BodyId, vel: Velocity) void {
+    switch (vel) {
+        .velocity => |v| {
+            b2.b2Body_SetLinearVelocity(body_id, .{ .x = v.x, .y = v.y });
+        },
+        .teleport => |p| {
+            b2.b2Body_SetTransform(
+                body_id,
+                .{ .x = p.x, .y = p.y },
+                b2.b2Body_GetRotation(body_id),
+            );
+        },
+    }
+}
+
+// Animators
+fn processAnimators(world: *WorldType) void {
+    for (world.components.items(.animator)) |*maybe_animator| {
+        if (maybe_animator.*) |anim| {
+            switch (anim) {
+                .animated => |at| {
+                    maybe_animator.* = .{ .static = at.next };
+                },
+                .static => {},
+            }
+        }
+    }
+}
+
+// Drawing
+fn drawBodies(world: *WorldType) void {
+    const physics_list = world.components.items(.physics);
+    const animator_list = world.components.items(.animator);
+
+    for (physics_list, animator_list) |maybe_phys, maybe_anim| {
+        if (maybe_phys == null or maybe_anim == null) continue;
+
+        const phys = maybe_phys.?;
+        const anim = maybe_anim.?;
+
+        switch (phys) {
+            .body => |body| {
+                switch (body.render_type) {
+                    .rectangle => drawRectangleBody(body, anim),
+                }
+            },
+            .world => {},
+        }
+    }
+}
+
+fn drawRectangleBody(body: PhysicsBody, anim: Animator) void {
+    const body_id = body.body_id;
+    var shape_id = body.shape_id;
+
+    const pos = b2.b2Body_GetPosition(body_id);
+    const rot = b2.b2Body_GetRotation(body_id);
+    const angle_deg = std.math.atan2(rot.s, rot.c) * (180.0 / std.math.pi);
+
+    const texture = switch (anim) {
+        .static => |t| t,
+        .animated => |at| at.current,
+    };
+
+    _ = b2.b2Body_GetShapes(body_id, &shape_id, 1);
+    const poly = b2.b2Shape_GetPolygon(shape_id);
+
+    const width = (poly.vertices[1].x - poly.vertices[0].x) * PIXELS_PER_METER;
+    const height = (poly.vertices[2].y - poly.vertices[1].y) * PIXELS_PER_METER;
+
+    rl.drawTexturePro(
+        texture,
+        .{
+            .x = 0,
+            .y = 0,
+            .width = @floatFromInt(texture.width),
+            .height = @floatFromInt(texture.height),
+        },
+        .{
+            .x = pos.x * PIXELS_PER_METER,
+            .y = pos.y * PIXELS_PER_METER,
             .width = width,
             .height = height,
-        };
-
-        const origin = rl.Vector2{ .x = width / 2, .y = height / 2 };
-        rl.drawTexturePro(texture, rl.Rectangle{ .x = 0, .y = 0, .width = @floatFromInt(texture.width), .height = @floatFromInt(texture.height) }, dest_rect, origin, angle * (180.0 / std.math.pi), // Convert to degrees for Raylib
-            rl.WHITE);
-    }
-}
-
-// Helper func for drawing, prob gonna add more, like if we add liquids or constraints eventually
-// Or we could just tag the shape with its "shape" but thats kinda idk man, might break, seems safer
-// to just verify here even if its less performant
-const shape_type = std.AutoHashMap(b2.b2BodyId, comptime V: type)
-fn isSimpleRectangle(body_id: b2.b2BodyId) bool {
-    // 1. Must have exactly one shape
-    if (b2.b2Body_GetShapeCount(body_id) != 1) return false;
-
-    var s_id: b2.b2ShapeId = undefined;
-    const count = b2.b2Body_GetShapes(body_id, &s_id, 1);
-
-    // 2. Must be a polygon
-    if (count == 1 and b2.b2Shape_GetType(s_id) == .b2_polygonShape) {
-        const poly = b2.b2Shape_GetPolygon(s_id);
-        // 3. A "box" created via b2MakeBox always has 4 vertices
-        return poly.count == 4;
-    }
-
-    return false;
+        },
+        .{ .x = width / 2.0, .y = height / 2.0 },
+        angle_deg,
+        .white,
+    );
 }
