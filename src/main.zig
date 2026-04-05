@@ -1,7 +1,7 @@
 const std = @import("std");
 const rl = @import("raylib");
 const stc = @import("stecs.zig");
-const ast = @import("asset.zig")
+const ast = @import("asset.zig");
 
 pub const Constants = struct {
     pub const SCREEN_WIDTH = 800;
