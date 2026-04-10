@@ -1,7 +1,5 @@
 const std = @import("std");
 const rl = @import("raylib");
-const stc = @import("stecs.zig");
-const ast = @import("asset.zig")
 
 pub const Constants = struct {
     pub const SCREEN_WIDTH = 800;
@@ -30,12 +28,7 @@ pub fn update() void {
         rl.clearBackground(Constants.CLEAR_BACKGROUND_COLOR);
         rl.endDrawing();
     }
-}
-
-pub fn draw(root: *stc.Instance) void {
-    for (root.children.items) |child| {
-        draw(child);
-    }
+    deinit();
 }
 
 pub fn deinit() void {
